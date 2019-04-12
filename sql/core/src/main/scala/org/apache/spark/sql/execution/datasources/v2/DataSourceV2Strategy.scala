@@ -23,23 +23,24 @@ import org.apache.spark.sql.{AnalysisException, Strategy}
 import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, AttributeSet, Expression, PredicateHelper, SubqueryExpression}
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, Repartition, Sample}
-import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SparkPlan}
-import org.apache.spark.sql.execution.datasources.DataSourceStrategy
+import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SampleExec, SparkPlan}
+import org.apache.spark.sql.execution.datasources.{DataSourceStrategy, LogicalRelation}
 import org.apache.spark.sql.execution.streaming.continuous.{ContinuousCoalesceExec, WriteToContinuousDataSource, WriteToContinuousDataSourceExec}
 import org.apache.spark.sql.sources
+import org.apache.spark.sql.sources.PrunedFilteredScan
 import org.apache.spark.sql.sources.v2.reader._
 import org.apache.spark.sql.sources.v2.reader.streaming.{ContinuousStream, MicroBatchStream}
 
 object DataSourceV2Strategy extends Strategy with PredicateHelper {
 
   /**
-    * Pushes down filters to the data source reader
-    *
-    * @return pushed filter and post-scan filters.
-    */
+   * Pushes down filters to the data source reader
+   *
+   * @return pushed filter and post-scan filters.
+   */
   private def pushFilters(
-                           scanBuilder: ScanBuilder,
-                           filters: Seq[Expression]): (Seq[Expression], Seq[Expression]) = {
+      scanBuilder: ScanBuilder,
+      filters: Seq[Expression]): (Seq[Expression], Seq[Expression]) = {
     scanBuilder match {
       case r: SupportsPushDownFilters =>
         // A map from translated data source filters to original catalyst filter expressions.
@@ -59,7 +60,8 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
         // Data source filters that need to be evaluated again after scanning. which means
         // the data source cannot guarantee the rows returned can pass these filters.
         // As a result we must return it so Spark can plan an extra filter operator.
-        val postScanFilters = r.pushFilters(translatedFilterToExpr.keys.toArray)
+        val postScanFilters = r
+          .pushFilters(translatedFilterToExpr.keys.toArray)
           .map(translatedFilterToExpr)
         // The filters which are marked as pushed to this data source
         val pushedFilters = r.pushedFilters().map(translatedFilterToExpr)
@@ -69,18 +71,17 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
     }
   }
 
-
   /**
-    * Applies column pruning to the data source, w.r.t. the references of the given expressions.
-    *
-    * @return the created `ScanConfig`(since column pruning is the last step of operator pushdown),
-    *         and new output attributes after column pruning.
-    */
+   * Applies column pruning to the data source, w.r.t. the references of the given expressions.
+   *
+   * @return the created `ScanConfig`(since column pruning is the last step of operator pushdown),
+   *         and new output attributes after column pruning.
+   */
   // TODO: nested column pruning.
   private def pruneColumns(
-                            scanBuilder: ScanBuilder,
-                            relation: DataSourceV2Relation,
-                            exprs: Seq[Expression]): (Scan, Seq[AttributeReference]) = {
+      scanBuilder: ScanBuilder,
+      relation: DataSourceV2Relation,
+      exprs: Seq[Expression]): (Scan, Seq[AttributeReference]) = {
     scanBuilder match {
       case r: SupportsPushDownRequiredColumns =>
         val requiredColumns = AttributeSet(exprs.flatMap(_.references))
@@ -91,7 +92,8 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
           val nameToAttr = relation.output.map(_.name).zip(relation.output).toMap
           scan -> scan.readSchema().toAttributes.map {
             // We have to keep the attribute id during transformation.
-            a => a.withExprId(nameToAttr(a.name).exprId)
+            a =>
+              a.withExprId(nameToAttr(a.name).exprId)
           }
         } else {
           r.build() -> relation.output
@@ -103,29 +105,34 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
 
   import DataSourceV2Implicits._
 
-  def pushDownSample(scanBuilder: ScanBuilder, plan: DataSourceV2Relation): DataSourceV2Relation = {
-    scanBuilder match {
-      case a: SupportsPushDownSampling =>
-        plan.find(_.isInstanceOf[Sample]) match {
-          case Some(sampling: Sample) =>
-            a.pushSampling(sampling)
-          case _ => // do nothing
-        }
-        plan
-
-      case _ =>
-        plan
-    }
-  }
-
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
-    case PhysicalOperation(project, filters, oldRelation: DataSourceV2Relation) =>
-      val scanBuilder = oldRelation.newScanBuilder()
 
-      val relation = pushDownSample(scanBuilder, oldRelation)
+    case s @ Sample(lower, upper, _, _, l @ PhysicalOperation(p, f, e: DataSourceV2Relation)) =>
 
-      val normalizedFilters = DataSourceStrategy.normalizeFilters(
-        filters.filterNot(SubqueryExpression.hasSubquery), relation.output)
+      val scanbuilder = e.newScanBuilder()
+
+      scanbuilder match {
+        case r: SupportsPushDownSampling if !s.withReplacement =>
+          // println("settigng that up")
+          r.pushSampling(s)
+          val (scan, output) = pruneColumns(scanbuilder, e, p)
+          val plan = BatchScanExec(output, scan)
+          ProjectExec(p, BatchScanExec(output, scan)) :: Nil
+
+        case a =>
+          // println(s"${a.getClass} does not support SPD")
+          SampleExec(lower, upper, s.withReplacement, s.seed, planLater(l)) :: Nil
+
+      }
+
+
+
+    case PhysicalOperation(project, filters, relation: DataSourceV2Relation) =>
+      // println("qui entro per davvero!")
+      val scanBuilder = relation.newScanBuilder()
+
+      val normalizedFilters = DataSourceStrategy
+        .normalizeFilters(filters.filterNot(SubqueryExpression.hasSubquery), relation.output)
 
       // `pushedFilters` will be pushed down and evaluated in the underlying data sources.
       // `postScanFilters` need to be evaluated after the scan.
@@ -141,7 +148,6 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
          """.stripMargin)
 
       val plan = BatchScanExec(output, scan)
-
 
       val filterCondition = postScanFilters.reduceLeftOption(And)
       val withFilter = filterCondition.map(FilterExec(_, plan)).getOrElse(plan)
