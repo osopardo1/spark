@@ -361,10 +361,11 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
       val cls = classOf[SimpleWriteOnlyDataSource]
       val path = file.getCanonicalPath
       val df = spark.range(5).select('id as 'i, -'id as 'j)
-      try {
-        df.write.format(cls.getName).option("path", path).mode("error").save()
-        df.write.format(cls.getName).option("path", path).mode("overwrite").save()
-        df.write.format(cls.getName).option("path", path).mode("ignore").save()
+      // non-append mode should not throw exception, as they don't access schema.
+      df.write.format(cls.getName).option("path", path).mode("error").save()
+      df.write.format(cls.getName).option("path", path).mode("ignore").save()
+      // append and overwrite modes will access the schema and should throw exception.
+      intercept[SchemaReadAttemptException] {
         df.write.format(cls.getName).option("path", path).mode("append").save()
       } catch {
         case e: SchemaReadAttemptException => fail("Schema read was attempted.", e)
@@ -382,6 +383,29 @@ class SimpleSinglePartitionSource extends DataSourceV2 with ReadSupport {
       java.util.Arrays.asList(new SimpleInputPartition(0, 5))
     }
   }
+
+  test("SPARK-PAOLA: Sampling push down") {
+    val df = spark.read
+      .format(classOf[PushDownSamplingDataSource].getName)
+      .load()
+      .sample(false, 0.1)
+
+    assert(df.queryExecution.executedPlan.collect { case e: SampleExec => e }.isEmpty)
+    assert(PushDownSamplingDataSource.samples.nonEmpty)
+
+    val df2 = spark.read
+      .format(classOf[AdvancedDataSourceV2].getName)
+      .load()
+      .sample(false, 0.1)
+
+    assert(df2.queryExecution.executedPlan.collect { case e: SampleExec => e }.nonEmpty)
+
+    val df3 = spark.read
+      .format(classOf[PushDownSamplingDataSource].getName)
+      .load()
+      .sample(true, 0.1)
+
+    assert(df3.queryExecution.executedPlan.collect { case e: SampleExec => e }.nonEmpty)
 
   override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
 }
@@ -619,5 +643,30 @@ class SimpleWriteOnlyDataSource extends SimpleWritableDataSource {
     // during schema retrieval. Might have to rewrite but it's done
     // such so for minimised changes.
     throw new SchemaReadAttemptException("read is not supported")
+  }
+}
+
+object PushDownSamplingDataSource {
+  var samples : List[Sample] = Nil
+
+}
+class PushDownSamplingDataSource extends TableProvider {
+
+  class MyScanBuilder extends SimpleScanBuilder with SupportsPushDownSampling {
+    import PushDownSamplingDataSource.samples
+
+    override def pushSampling(sample: Sample): Unit = {
+      samples = sample :: samples
+    }
+
+    override def planInputPartitions(): Array[InputPartition] = Array.empty
+  }
+
+  override def getTable(options: CaseInsensitiveStringMap): Table = {
+    new SimpleBatchTable {
+      override def newScanBuilder(options: CaseInsensitiveStringMap): ScanBuilder = {
+        new MyScanBuilder
+      }
+    }
   }
 }

@@ -84,13 +84,14 @@ object DataSourceV2Strategy extends Strategy {
         val neededOutput = relation.output.filter(requiredColumns.contains)
         if (neededOutput != relation.output) {
           r.pruneColumns(neededOutput.toStructType)
+          val scan = r.build()
           val nameToAttr = relation.output.map(_.name).zip(relation.output).toMap
-          r.readSchema().toAttributes.map {
+          scan -> scan.readSchema().toAttributes.map {
             // We have to keep the attribute id during transformation.
             a => a.withExprId(nameToAttr(a.name).exprId)
           }
         } else {
-          relation.output
+          r.build() -> relation.output
         }
 
       case _ => relation.output
@@ -99,13 +100,33 @@ object DataSourceV2Strategy extends Strategy {
 
 
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
+
+    case s @ Sample(_, _, _, _, l @ PhysicalOperation(p, f, e: DataSourceV2Relation)) =>
+
+      val scanbuilder = e.newScanBuilder()
+
+      scanbuilder match {
+        case r: SupportsPushDownSampling if !s.withReplacement =>
+          r.pushSampling(s)
+          val (scan, output) = pruneColumns(scanbuilder, e, p)
+          val plan = BatchScanExec(output, scan)
+          ProjectExec(p, plan) :: Nil
+
+        case _ => Nil
+
+      }
+
     case PhysicalOperation(project, filters, relation: DataSourceV2Relation) =>
-      val reader = relation.newReader()
+      val scanBuilder = relation.newScanBuilder()
+
+      val normalizedFilters = DataSourceStrategy
+        .normalizeFilters(filters.filterNot(SubqueryExpression.hasSubquery), relation.output)
+
       // `pushedFilters` will be pushed down and evaluated in the underlying data sources.
       // `postScanFilters` need to be evaluated after the scan.
       // `postScanFilters` and `pushedFilters` can overlap, e.g. the parquet row group filter.
-      val (pushedFilters, postScanFilters) = pushFilters(reader, filters)
-      val output = pruneColumns(reader, relation, project ++ postScanFilters)
+      val (pushedFilters, postScanFilters) = pushFilters(scanBuilder, normalizedFilters)
+      val (scan, output) = pruneColumns(scanBuilder, relation, project ++ postScanFilters)
       logInfo(
         s"""
            |Pushing operators to ${relation.source.getClass}
