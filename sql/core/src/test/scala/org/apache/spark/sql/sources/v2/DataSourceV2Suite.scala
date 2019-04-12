@@ -25,13 +25,19 @@ import test.org.apache.spark.sql.sources.v2._
 import org.apache.spark.SparkException
 import org.apache.spark.sql.{DataFrame, QueryTest, Row}
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.plans.logical.Sample
+import org.apache.spark.sql.execution.SampleExec
 import org.apache.spark.sql.execution.datasources.v2.{BatchScanExec, DataSourceV2Relation}
 import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.sources.{Filter, GreaterThan}
 import org.apache.spark.sql.sources.v2.reader._
-import org.apache.spark.sql.sources.v2.reader.partitioning.{ClusteredDistribution, Distribution, Partitioning}
+import org.apache.spark.sql.sources.v2.reader.partitioning.{
+  ClusteredDistribution,
+  Distribution,
+  Partitioning
+}
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.types.{IntegerType, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -184,7 +190,7 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
     }
   }
 
-  test ("statistics report data source") {
+  test("statistics report data source") {
     Seq(classOf[ReportStatisticsDataSource], classOf[JavaReportStatisticsDataSource]).foreach {
       cls =>
         withClue(cls.getName) {
@@ -194,16 +200,19 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
           }.head
 
           val statics = logical.computeStats()
-          assert(statics.rowCount.isDefined && statics.rowCount.get === 10,
+          assert(
+            statics.rowCount.isDefined && statics.rowCount.get === 10,
             "Row count statics should be reported by data source")
-          assert(statics.sizeInBytes === 80,
+          assert(
+            statics.sizeInBytes === 80,
             "Size in bytes statics should be reported by data source")
         }
     }
   }
 
   test("SPARK-23574: no shuffle exchange with single partition") {
-    val df = spark.read.format(classOf[SimpleSinglePartitionSource].getName).load().agg(count("*"))
+    val df =
+      spark.read.format(classOf[SimpleSinglePartitionSource].getName).load().agg(count("*"))
     assert(df.queryExecution.executedPlan.collect { case e: Exchange => e }.isEmpty)
   }
 
@@ -214,47 +223,77 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
         val path = file.getCanonicalPath
         assert(spark.read.format(cls.getName).option("path", path).load().collect().isEmpty)
 
-        spark.range(10).select('id as 'i, -'id as 'j).write.format(cls.getName)
-          .option("path", path).save()
+        spark
+          .range(10)
+          .select('id as 'i, -'id as 'j)
+          .write
+          .format(cls.getName)
+          .option("path", path)
+          .save()
         checkAnswer(
           spark.read.format(cls.getName).option("path", path).load(),
           spark.range(10).select('id, -'id))
 
         // test with different save modes
-        spark.range(10).select('id as 'i, -'id as 'j).write.format(cls.getName)
-          .option("path", path).mode("append").save()
+        spark
+          .range(10)
+          .select('id as 'i, -'id as 'j)
+          .write
+          .format(cls.getName)
+          .option("path", path)
+          .mode("append")
+          .save()
         checkAnswer(
           spark.read.format(cls.getName).option("path", path).load(),
           spark.range(10).union(spark.range(10)).select('id, -'id))
 
-        spark.range(5).select('id as 'i, -'id as 'j).write.format(cls.getName)
-          .option("path", path).mode("overwrite").save()
+        spark
+          .range(5)
+          .select('id as 'i, -'id as 'j)
+          .write
+          .format(cls.getName)
+          .option("path", path)
+          .mode("overwrite")
+          .save()
         checkAnswer(
           spark.read.format(cls.getName).option("path", path).load(),
           spark.range(5).select('id, -'id))
 
-        spark.range(5).select('id as 'i, -'id as 'j).write.format(cls.getName)
-          .option("path", path).mode("ignore").save()
+        spark
+          .range(5)
+          .select('id as 'i, -'id as 'j)
+          .write
+          .format(cls.getName)
+          .option("path", path)
+          .mode("ignore")
+          .save()
         checkAnswer(
           spark.read.format(cls.getName).option("path", path).load(),
           spark.range(5).select('id, -'id))
 
         val e = intercept[Exception] {
-          spark.range(5).select('id as 'i, -'id as 'j).write.format(cls.getName)
-            .option("path", path).mode("error").save()
+          spark
+            .range(5)
+            .select('id as 'i, -'id as 'j)
+            .write
+            .format(cls.getName)
+            .option("path", path)
+            .mode("error")
+            .save()
         }
         assert(e.getMessage.contains("data already exists"))
 
         // test transaction
         val failingUdf = org.apache.spark.sql.functions.udf {
           var count = 0
-          (id: Long) => {
-            if (count > 5) {
-              throw new RuntimeException("testing error")
+          (id: Long) =>
+            {
+              if (count > 5) {
+                throw new RuntimeException("testing error")
+              }
+              count += 1
+              id
             }
-            count += 1
-            id
-          }
         }
         // this input data will fail to read middle way.
         val input = spark.range(10).select(failingUdf('id).as('i)).select('i, -'i as 'j)
@@ -275,13 +314,19 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
         assert(spark.read.format(cls.getName).option("path", path).load().collect().isEmpty)
 
         val numPartition = 6
-        spark.range(0, 10, 1, numPartition).select('id as 'i, -'id as 'j).write.format(cls.getName)
-          .option("path", path).save()
+        spark
+          .range(0, 10, 1, numPartition)
+          .select('id as 'i, -'id as 'j)
+          .write
+          .format(cls.getName)
+          .option("path", path)
+          .save()
         checkAnswer(
           spark.read.format(cls.getName).option("path", path).load(),
           spark.range(10).select('id, -'id))
 
-        assert(SimpleCounter.getCounter == numPartition,
+        assert(
+          SimpleCounter.getCounter == numPartition,
           "method onDataWriterCommit should be called as many as the number of partitions")
       }
     }
@@ -322,7 +367,9 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
 
   test("SPARK-23315: get output from canonicalized data source v2 related plans") {
     def checkCanonicalizedOutput(
-        df: DataFrame, logicalNumOutput: Int, physicalNumOutput: Int): Unit = {
+        df: DataFrame,
+        logicalNumOutput: Int,
+        physicalNumOutput: Int): Unit = {
       val logical = df.queryExecution.optimizedPlan.collect {
         case d: DataSourceV2Relation => d
       }.head
@@ -343,10 +390,10 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
     val prefix = "spark.datasource.userDefinedDataSource."
     val optionName = "optionA"
     withSQLConf(prefix + optionName -> "true") {
-      val df = spark
-        .read
+      val df = spark.read
         .option(optionName, false)
-        .format(classOf[DataSourceV2WithSessionConfig].getName).load()
+        .format(classOf[DataSourceV2WithSessionConfig].getName)
+        .load()
       val options = df.queryExecution.optimizedPlan.collectFirst {
         case d: DataSourceV2Relation => d.options
       }.get
@@ -388,8 +435,32 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
       }
     }
   }
-}
 
+  test("SPARK-PAOLA: Sampling push down") {
+    val df = spark.read
+      .format(classOf[PushDownSamplingDataSource].getName)
+      .load()
+      .sample(false, 0.1)
+
+    assert(df.queryExecution.executedPlan.collect { case e: SampleExec => e }.isEmpty)
+    assert(PushDownSamplingDataSource.samples.nonEmpty)
+
+    val df2 = spark.read
+      .format(classOf[AdvancedDataSourceV2].getName)
+      .load()
+      .sample(false, 0.1)
+
+    assert(df2.queryExecution.executedPlan.collect { case e: SampleExec => e }.nonEmpty)
+
+    val df3 = spark.read
+      .format(classOf[PushDownSamplingDataSource].getName)
+      .load()
+      .sample(true, 0.1)
+
+    assert(df3.queryExecution.executedPlan.collect { case e: SampleExec => e }.nonEmpty)
+
+  }
+}
 
 case class RangeInputPartition(start: Int, end: Int) extends InputPartition
 
@@ -411,15 +482,14 @@ object SimpleReaderFactory extends PartitionReaderFactory {
   }
 }
 
-abstract class SimpleBatchTable extends Table with SupportsBatchRead  {
+abstract class SimpleBatchTable extends Table with SupportsBatchRead {
 
   override def schema(): StructType = new StructType().add("i", "int").add("j", "int")
 
   override def name(): String = this.getClass.toString
 }
 
-abstract class SimpleScanBuilder extends ScanBuilder
-  with Batch with Scan {
+abstract class SimpleScanBuilder extends ScanBuilder with Batch with Scan {
 
   override def build(): Scan = this
 
@@ -471,8 +541,11 @@ class AdvancedDataSourceV2 extends TableProvider {
   }
 }
 
-class AdvancedScanBuilder extends ScanBuilder
-  with Scan with SupportsPushDownFilters with SupportsPushDownRequiredColumns {
+class AdvancedScanBuilder
+    extends ScanBuilder
+    with Scan
+    with SupportsPushDownFilters
+    with SupportsPushDownRequiredColumns {
 
   var requiredSchema = new StructType().add("i", "int").add("j", "int")
   var filters = Array.empty[Filter]
@@ -550,7 +623,6 @@ class AdvancedReaderFactory(requiredSchema: StructType) extends PartitionReaderF
     }
   }
 }
-
 
 class SchemaRequiredDataSource extends TableProvider {
 
@@ -643,8 +715,7 @@ object ColumnarReaderFactory extends PartitionReaderFactory {
 
 class PartitionAwareDataSource extends TableProvider {
 
-  class MyScanBuilder extends SimpleScanBuilder
-    with SupportsReportPartitioning{
+  class MyScanBuilder extends SimpleScanBuilder with SupportsReportPartitioning {
 
     override def planInputPartitions(): Array[InputPartition] = {
       // Note that we don't have same value of column `a` across partitions.
@@ -711,8 +782,7 @@ class SimpleWriteOnlyDataSource extends SimpleWritableDataSource {
 
 class ReportStatisticsDataSource extends TableProvider {
 
-  class MyScanBuilder extends SimpleScanBuilder
-    with SupportsReportStatistics {
+  class MyScanBuilder extends SimpleScanBuilder with SupportsReportStatistics {
     override def estimateStatistics(): Statistics = {
       new Statistics {
         override def sizeInBytes(): OptionalLong = OptionalLong.of(80)
@@ -724,6 +794,31 @@ class ReportStatisticsDataSource extends TableProvider {
     override def planInputPartitions(): Array[InputPartition] = {
       Array(RangeInputPartition(0, 5), RangeInputPartition(5, 10))
     }
+  }
+
+  override def getTable(options: CaseInsensitiveStringMap): Table = {
+    new SimpleBatchTable {
+      override def newScanBuilder(options: CaseInsensitiveStringMap): ScanBuilder = {
+        new MyScanBuilder
+      }
+    }
+  }
+}
+
+object PushDownSamplingDataSource {
+  var samples : List[Sample] = Nil
+
+}
+class PushDownSamplingDataSource extends TableProvider {
+
+  class MyScanBuilder extends SimpleScanBuilder with SupportsPushDownSampling {
+    import PushDownSamplingDataSource.samples
+
+    override def pushSampling(sample: Sample): Unit = {
+      samples = sample :: samples
+    }
+
+    override def planInputPartitions(): Array[InputPartition] = Array.empty
   }
 
   override def getTable(options: CaseInsensitiveStringMap): Table = {

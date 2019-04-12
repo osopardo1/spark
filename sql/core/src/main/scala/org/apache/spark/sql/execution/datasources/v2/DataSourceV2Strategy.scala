@@ -22,11 +22,12 @@ import scala.collection.mutable
 import org.apache.spark.sql.{AnalysisException, Strategy}
 import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, AttributeSet, Expression, PredicateHelper, SubqueryExpression}
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
-import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, Repartition}
-import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SparkPlan}
-import org.apache.spark.sql.execution.datasources.DataSourceStrategy
+import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, OverwriteByExpression, OverwritePartitionsDynamic, Repartition, Sample}
+import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SampleExec, SparkPlan}
+import org.apache.spark.sql.execution.datasources.{DataSourceStrategy, LogicalRelation}
 import org.apache.spark.sql.execution.streaming.continuous.{ContinuousCoalesceExec, WriteToContinuousDataSource, WriteToContinuousDataSourceExec}
 import org.apache.spark.sql.sources
+import org.apache.spark.sql.sources.PrunedFilteredScan
 import org.apache.spark.sql.sources.v2.reader._
 import org.apache.spark.sql.sources.v2.reader.streaming.{ContinuousStream, MicroBatchStream}
 
@@ -59,7 +60,8 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
         // Data source filters that need to be evaluated again after scanning. which means
         // the data source cannot guarantee the rows returned can pass these filters.
         // As a result we must return it so Spark can plan an extra filter operator.
-        val postScanFilters = r.pushFilters(translatedFilterToExpr.keys.toArray)
+        val postScanFilters = r
+          .pushFilters(translatedFilterToExpr.keys.toArray)
           .map(translatedFilterToExpr)
         // The filters which are marked as pushed to this data source
         val pushedFilters = r.pushedFilters().map(translatedFilterToExpr)
@@ -90,7 +92,8 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
           val nameToAttr = relation.output.map(_.name).zip(relation.output).toMap
           scan -> scan.readSchema().toAttributes.map {
             // We have to keep the attribute id during transformation.
-            a => a.withExprId(nameToAttr(a.name).exprId)
+            a =>
+              a.withExprId(nameToAttr(a.name).exprId)
           }
         } else {
           r.build() -> relation.output
@@ -103,11 +106,27 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
   import DataSourceV2Implicits._
 
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
+
+    case s @ Sample(_, _, _, _, l @ PhysicalOperation(p, f, e: DataSourceV2Relation)) =>
+
+      val scanbuilder = e.newScanBuilder()
+
+      scanbuilder match {
+        case r: SupportsPushDownSampling if !s.withReplacement =>
+          r.pushSampling(s)
+          val (scan, output) = pruneColumns(scanbuilder, e, p)
+          val plan = BatchScanExec(output, scan)
+          ProjectExec(p, plan) :: Nil
+
+        case _ => Nil
+
+      }
+
     case PhysicalOperation(project, filters, relation: DataSourceV2Relation) =>
       val scanBuilder = relation.newScanBuilder()
 
-      val normalizedFilters = DataSourceStrategy.normalizeFilters(
-        filters.filterNot(SubqueryExpression.hasSubquery), relation.output)
+      val normalizedFilters = DataSourceStrategy
+        .normalizeFilters(filters.filterNot(SubqueryExpression.hasSubquery), relation.output)
 
       // `pushedFilters` will be pushed down and evaluated in the underlying data sources.
       // `postScanFilters` need to be evaluated after the scan.
@@ -153,8 +172,9 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
     case OverwriteByExpression(r: DataSourceV2Relation, deleteExpr, query, _) =>
       // fail if any filter cannot be converted. correctness depends on removing all matching data.
       val filters = splitConjunctivePredicates(deleteExpr).map {
-        filter => DataSourceStrategy.translateFilter(deleteExpr).getOrElse(
-          throw new AnalysisException(s"Cannot translate expression to source filter: $filter"))
+        filter =>
+          DataSourceStrategy.translateFilter(deleteExpr).getOrElse(
+            throw new AnalysisException(s"Cannot translate expression to source filter: $filter"))
       }.toArray
 
       OverwriteByExpressionExec(
