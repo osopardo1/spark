@@ -21,10 +21,10 @@ import java.io.File
 import java.util.OptionalLong
 
 import test.org.apache.spark.sql.sources.v2._
-
 import org.apache.spark.SparkException
 import org.apache.spark.sql.{DataFrame, QueryTest, Row}
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.plans.logical.Sample
 import org.apache.spark.sql.execution.datasources.v2.{BatchScanExec, DataSourceV2Relation}
 import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
@@ -388,6 +388,12 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
       }
     }
   }
+
+  test("SPARK-PAOLA: Sampling push down") {
+    val df = spark.read.format(classOf[PushDownSamplingDataSource].getName).load().agg(count("*"))
+
+    assert(df.queryExecution.executedPlan.collect { case e: Exchange => e }.isEmpty)
+  }
 }
 
 
@@ -724,6 +730,45 @@ class ReportStatisticsDataSource extends TableProvider {
     override def planInputPartitions(): Array[InputPartition] = {
       Array(RangeInputPartition(0, 5), RangeInputPartition(5, 10))
     }
+  }
+
+  override def getTable(options: CaseInsensitiveStringMap): Table = {
+    new SimpleBatchTable {
+      override def newScanBuilder(options: CaseInsensitiveStringMap): ScanBuilder = {
+        new MyScanBuilder
+      }
+    }
+  }
+}
+
+
+class PushDownSamplingDataSource extends TableProvider {
+
+  class MyScanBuilder extends SimpleScanBuilder
+    with SupportsPushDownSampling {
+    /**
+      **
+      * TODO
+      */
+    override def pushSampling(sample: Sample): Unit = {
+      println("ciao")
+    }
+
+
+
+    /**
+      * Returns a list of {@link InputPartition input partitions}. Each {@link InputPartition}
+      * represents a data split that can be processed by one Spark task. The number of input
+      * partitions returned here is the same as the number of RDD partitions this scan outputs.
+      * <p>
+      * If the {@link Scan} supports filter pushdown, this Batch is likely configured with a filter
+      * and is responsible for creating splits for that filter, which is not a full scan.
+      * </p>
+      * <p>
+      * This method will be called only once during a data source scan, to launch one Spark job.
+      * </p>
+      */
+    override def planInputPartitions(): Array[InputPartition] = Array.empty
   }
 
   override def getTable(options: CaseInsensitiveStringMap): Table = {
