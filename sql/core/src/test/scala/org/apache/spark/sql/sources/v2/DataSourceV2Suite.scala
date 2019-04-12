@@ -437,7 +437,6 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
   }
 
   test("SPARK-PAOLA: Sampling push down") {
-    log.warn("MALDITO")
     val df = spark.read
       .format(classOf[PushDownSamplingDataSource].getName)
       .load()
@@ -445,7 +444,6 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
 
     assert(df.queryExecution.executedPlan.collect { case e: SampleExec => e }.isEmpty)
     assert(PushDownSamplingDataSource.samples.nonEmpty)
-    df.explain(true)
 
     val df2 = spark.read
       .format(classOf[AdvancedDataSourceV2].getName)
@@ -453,14 +451,14 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
       .sample(false, 0.1)
 
     assert(df2.queryExecution.executedPlan.collect { case e: SampleExec => e }.nonEmpty)
-    df2.explain(true)
+
     val df3 = spark.read
       .format(classOf[PushDownSamplingDataSource].getName)
       .load()
       .sample(true, 0.1)
 
     assert(df3.queryExecution.executedPlan.collect { case e: SampleExec => e }.nonEmpty)
-    df3.explain(true)
+
   }
 }
 
@@ -818,7 +816,6 @@ class PushDownSamplingDataSource extends TableProvider {
 
     override def pushSampling(sample: Sample): Unit = {
       samples = sample :: samples
-      println("ciao")
     }
 
     override def planInputPartitions(): Array[InputPartition] = Array.empty

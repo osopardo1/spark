@@ -107,28 +107,22 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
 
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
 
-    case s @ Sample(lower, upper, _, _, l @ PhysicalOperation(p, f, e: DataSourceV2Relation)) =>
+    case s @ Sample(_, _, _, _, l @ PhysicalOperation(p, f, e: DataSourceV2Relation)) =>
 
       val scanbuilder = e.newScanBuilder()
 
       scanbuilder match {
         case r: SupportsPushDownSampling if !s.withReplacement =>
-          // println("settigng that up")
           r.pushSampling(s)
-          val (scan, output) = pruneColumns(scanbuilder, e, p)
+          val (scan, output) = scanbuilder.build() -> e.output
           val plan = BatchScanExec(output, scan)
-          ProjectExec(p, BatchScanExec(output, scan)) :: Nil
+          ProjectExec(p, plan) :: Nil
 
-        case a =>
-          // println(s"${a.getClass} does not support SPD")
-          SampleExec(lower, upper, s.withReplacement, s.seed, planLater(l)) :: Nil
+        case _ => Nil
 
       }
 
-
-
     case PhysicalOperation(project, filters, relation: DataSourceV2Relation) =>
-      // println("qui entro per davvero!")
       val scanBuilder = relation.newScanBuilder()
 
       val normalizedFilters = DataSourceStrategy
