@@ -114,7 +114,7 @@ object DataSourceV2Strategy extends Strategy with PredicateHelper {
       scanbuilder match {
         case r: SupportsPushDownSampling if !s.withReplacement =>
           r.pushSampling(s)
-          val (scan, output) = scanbuilder.build() -> e.output
+          val (scan, output) = pruneColumns(scanbuilder, e, p)
           val plan = BatchScanExec(output, scan)
           ProjectExec(p, plan) :: Nil
 
