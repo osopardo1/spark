@@ -22,6 +22,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.plans.logical.Sample
 import org.apache.spark.sql.execution.streaming.{Sink, Source}
 import org.apache.spark.sql.streaming.OutputMode
 import org.apache.spark.sql.types.StructType
@@ -235,6 +236,7 @@ abstract class BaseRelation {
    * @since 1.6.0
    */
   def unhandledFilters(filters: Array[Filter]): Array[Filter] = filters
+
 }
 
 /**
@@ -275,6 +277,46 @@ trait PrunedScan {
 trait PrunedFilteredScan {
   def buildScan(requiredColumns: Array[String], filters: Array[Filter]): RDD[Row]
 }
+
+
+@InterfaceStability.Stable
+trait PrunedSampledFilteredScan {
+
+  def buildScan(requiredColumns: Array[String], filters: Array[Filter], sample: Sample): RDD[Row]
+}
+
+
+@InterfaceStability.Stable
+trait SampledFilteredScan {
+
+  def buildScan(filters: Array[Filter], sample: Sample): RDD[Row]
+}
+
+@InterfaceStability.Stable
+trait PrunedSampledScan {
+
+  def buildScan(requiredColumns: Array[String], sample: Sample): RDD[Row]
+}
+
+
+@InterfaceStability.Stable
+trait SampledScan {
+
+  def buildScan(sample: Sample): RDD[Row]
+}
+
+/**
+  * Old Interface to do the PushDown sampling: used for testing purposes
+  */
+
+@InterfaceStability.Stable
+trait PushDownSampling {
+  def pushSampling(sample: Sample): Boolean
+
+  def buildScan(requiredColumns: Array[String], filters: Array[Filter]): RDD[Row]
+}
+
+
 
 /**
  * A BaseRelation that can be used to insert data into it through the insert method.

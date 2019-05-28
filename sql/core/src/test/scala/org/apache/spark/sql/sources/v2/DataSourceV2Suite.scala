@@ -25,6 +25,8 @@ import test.org.apache.spark.sql.sources.v2._
 import org.apache.spark.SparkException
 import org.apache.spark.sql.{DataFrame, QueryTest, Row}
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.plans.logical.Sample
+import org.apache.spark.sql.execution.SampleExec
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2ScanExec}
 import org.apache.spark.sql.execution.exchange.{Exchange, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector
@@ -37,6 +39,7 @@ import org.apache.spark.sql.types.{IntegerType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 class DataSourceV2Suite extends QueryTest with SharedSQLContext {
+
   import testImplicits._
 
   test("simplest implementation") {
@@ -361,26 +364,14 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
       val cls = classOf[SimpleWriteOnlyDataSource]
       val path = file.getCanonicalPath
       val df = spark.range(5).select('id as 'i, -'id as 'j)
-      // non-append mode should not throw exception, as they don't access schema.
-      df.write.format(cls.getName).option("path", path).mode("error").save()
-      df.write.format(cls.getName).option("path", path).mode("ignore").save()
-      // append and overwrite modes will access the schema and should throw exception.
-      intercept[SchemaReadAttemptException] {
+      try {
+        df.write.format(cls.getName).option("path", path).mode("error").save()
+        df.write.format(cls.getName).option("path", path).mode("overwrite").save()
+        df.write.format(cls.getName).option("path", path).mode("ignore").save()
         df.write.format(cls.getName).option("path", path).mode("append").save()
       } catch {
         case e: SchemaReadAttemptException => fail("Schema read was attempted.", e)
       }
-    }
-  }
-}
-
-class SimpleSinglePartitionSource extends DataSourceV2 with ReadSupport {
-
-  class Reader extends DataSourceReader {
-    override def readSchema(): StructType = new StructType().add("i", "int").add("j", "int")
-
-    override def planInputPartitions(): JList[InputPartition[InternalRow]] = {
-      java.util.Arrays.asList(new SimpleInputPartition(0, 5))
     }
   }
 
@@ -406,267 +397,282 @@ class SimpleSinglePartitionSource extends DataSourceV2 with ReadSupport {
       .sample(true, 0.1)
 
     assert(df3.queryExecution.executedPlan.collect { case e: SampleExec => e }.nonEmpty)
+  }
 
-  override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
+  class SimpleSinglePartitionSource extends DataSourceV2 with ReadSupport {
+
+    class Reader extends DataSourceReader {
+      override def readSchema(): StructType = new StructType().add("i", "int").add("j", "int")
+
+      override def planInputPartitions(): JList[InputPartition[InternalRow]] = {
+        java.util.Arrays.asList(new SimpleInputPartition(0, 5))
+      }
+    }
+
+    override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
+  }
+
 }
 
-// This class is used by pyspark tests. If this class is modified/moved, make sure pyspark
-// tests still pass.
-class SimpleDataSourceV2 extends DataSourceV2 with ReadSupport {
+  // This class is used by pyspark tests. If this class is modified/moved, make sure pyspark
+  // tests still pass.
+  class SimpleDataSourceV2 extends DataSourceV2 with ReadSupport {
 
-  class Reader extends DataSourceReader {
-    override def readSchema(): StructType = new StructType().add("i", "int").add("j", "int")
+    class Reader extends DataSourceReader {
+      override def readSchema(): StructType = new StructType().add("i", "int").add("j", "int")
 
-    override def planInputPartitions(): JList[InputPartition[InternalRow]] = {
-      java.util.Arrays.asList(new SimpleInputPartition(0, 5), new SimpleInputPartition(5, 10))
+      override def planInputPartitions(): JList[InputPartition[InternalRow]] = {
+        java.util.Arrays.asList(new SimpleInputPartition(0, 5), new SimpleInputPartition(5, 10))
+      }
+    }
+
+    override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
+  }
+
+  class SimpleInputPartition(start: Int, end: Int)
+    extends InputPartition[InternalRow]
+      with InputPartitionReader[InternalRow] {
+    private var current = start - 1
+
+    override def createPartitionReader(): InputPartitionReader[InternalRow] =
+      new SimpleInputPartition(start, end)
+
+    override def next(): Boolean = {
+      current += 1
+      current < end
+    }
+
+    override def get(): InternalRow = InternalRow(current, -current)
+
+    override def close(): Unit = {}
+  }
+
+  class AdvancedDataSourceV2 extends DataSourceV2 with ReadSupport {
+
+    class Reader extends DataSourceReader
+      with SupportsPushDownRequiredColumns with SupportsPushDownFilters {
+
+      var requiredSchema = new StructType().add("i", "int").add("j", "int")
+      var filters = Array.empty[Filter]
+
+      override def pruneColumns(requiredSchema: StructType): Unit = {
+        this.requiredSchema = requiredSchema
+      }
+
+      override def pushFilters(filters: Array[Filter]): Array[Filter] = {
+        val (supported, unsupported) = filters.partition {
+          case GreaterThan("i", _: Int) => true
+          case _ => false
+        }
+        this.filters = supported
+        unsupported
+      }
+
+      override def pushedFilters(): Array[Filter] = filters
+
+      override def readSchema(): StructType = {
+        requiredSchema
+      }
+
+      override def planInputPartitions(): JList[InputPartition[InternalRow]] = {
+        val lowerBound = filters.collectFirst {
+          case GreaterThan("i", v: Int) => v
+        }
+
+        val res = new ArrayList[InputPartition[InternalRow]]
+
+        if (lowerBound.isEmpty) {
+          res.add(new AdvancedInputPartition(0, 5, requiredSchema))
+          res.add(new AdvancedInputPartition(5, 10, requiredSchema))
+        } else if (lowerBound.get < 4) {
+          res.add(new AdvancedInputPartition(lowerBound.get + 1, 5, requiredSchema))
+          res.add(new AdvancedInputPartition(5, 10, requiredSchema))
+        } else if (lowerBound.get < 9) {
+          res.add(new AdvancedInputPartition(lowerBound.get + 1, 10, requiredSchema))
+        }
+
+        res
+      }
+    }
+
+    override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
+  }
+
+  class AdvancedInputPartition(start: Int, end: Int, requiredSchema: StructType)
+    extends InputPartition[InternalRow] with InputPartitionReader[InternalRow] {
+
+    private var current = start - 1
+
+    override def createPartitionReader(): InputPartitionReader[InternalRow] = {
+      new AdvancedInputPartition(start, end, requiredSchema)
+    }
+
+    override def close(): Unit = {}
+
+    override def next(): Boolean = {
+      current += 1
+      current < end
+    }
+
+    override def get(): InternalRow = {
+      val values = requiredSchema.map(_.name).map {
+        case "i" => current
+        case "j" => -current
+      }
+      InternalRow.fromSeq(values)
     }
   }
 
-  override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
-}
 
-class SimpleInputPartition(start: Int, end: Int)
-  extends InputPartition[InternalRow]
-  with InputPartitionReader[InternalRow] {
-  private var current = start - 1
+  class SchemaRequiredDataSource extends DataSourceV2 with ReadSupport {
 
-  override def createPartitionReader(): InputPartitionReader[InternalRow] =
-    new SimpleInputPartition(start, end)
-
-  override def next(): Boolean = {
-    current += 1
-    current < end
-  }
-
-  override def get(): InternalRow = InternalRow(current, -current)
-
-  override def close(): Unit = {}
-}
-
-class AdvancedDataSourceV2 extends DataSourceV2 with ReadSupport {
-
-  class Reader extends DataSourceReader
-    with SupportsPushDownRequiredColumns with SupportsPushDownFilters {
-
-    var requiredSchema = new StructType().add("i", "int").add("j", "int")
-    var filters = Array.empty[Filter]
-
-    override def pruneColumns(requiredSchema: StructType): Unit = {
-      this.requiredSchema = requiredSchema
+    class Reader(val readSchema: StructType) extends DataSourceReader {
+      override def planInputPartitions(): JList[InputPartition[InternalRow]] =
+        java.util.Collections.emptyList()
     }
 
-    override def pushFilters(filters: Array[Filter]): Array[Filter] = {
-      val (supported, unsupported) = filters.partition {
-        case GreaterThan("i", _: Int) => true
+    override def createReader(options: DataSourceOptions): DataSourceReader = {
+      throw new IllegalArgumentException("requires a user-supplied schema")
+    }
+
+    override def createReader(schema: StructType, options: DataSourceOptions): DataSourceReader = {
+      new Reader(schema)
+    }
+  }
+
+  class BatchDataSourceV2 extends DataSourceV2 with ReadSupport {
+
+    class Reader extends DataSourceReader with SupportsScanColumnarBatch {
+      override def readSchema(): StructType = new StructType().add("i", "int").add("j", "int")
+
+      override def planBatchInputPartitions(): JList[InputPartition[ColumnarBatch]] = {
+        java.util.Arrays.asList(
+          new BatchInputPartitionReader(0, 50), new BatchInputPartitionReader(50, 90))
+      }
+    }
+
+    override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
+  }
+
+  class BatchInputPartitionReader(start: Int, end: Int)
+    extends InputPartition[ColumnarBatch] with InputPartitionReader[ColumnarBatch] {
+
+    private final val BATCH_SIZE = 20
+    private lazy val i = new OnHeapColumnVector(BATCH_SIZE, IntegerType)
+    private lazy val j = new OnHeapColumnVector(BATCH_SIZE, IntegerType)
+    private lazy val batch = new ColumnarBatch(Array(i, j))
+
+    private var current = start
+
+    override def createPartitionReader(): InputPartitionReader[ColumnarBatch] = this
+
+    override def next(): Boolean = {
+      i.reset()
+      j.reset()
+
+      var count = 0
+      while (current < end && count < BATCH_SIZE) {
+        i.putInt(count, current)
+        j.putInt(count, -current)
+        current += 1
+        count += 1
+      }
+
+      if (count == 0) {
+        false
+      } else {
+        batch.setNumRows(count)
+        true
+      }
+    }
+
+    override def get(): ColumnarBatch = {
+      batch
+    }
+
+    override def close(): Unit = batch.close()
+  }
+
+  class PartitionAwareDataSource extends DataSourceV2 with ReadSupport {
+
+    class Reader extends DataSourceReader with SupportsReportPartitioning {
+      override def readSchema(): StructType = new StructType().add("a", "int").add("b", "int")
+
+      override def planInputPartitions(): JList[InputPartition[InternalRow]] = {
+        // Note that we don't have same value of column `a` across partitions.
+        java.util.Arrays.asList(
+          new SpecificInputPartitionReader(Array(1, 1, 3), Array(4, 4, 6)),
+          new SpecificInputPartitionReader(Array(2, 4, 4), Array(6, 2, 2)))
+      }
+
+      override def outputPartitioning(): Partitioning = new MyPartitioning
+    }
+
+    class MyPartitioning extends Partitioning {
+      override def numPartitions(): Int = 2
+
+      override def satisfy(distribution: Distribution): Boolean = distribution match {
+        case c: ClusteredDistribution => c.clusteredColumns.contains("a")
         case _ => false
       }
-      this.filters = supported
-      unsupported
     }
 
-    override def pushedFilters(): Array[Filter] = filters
-
-    override def readSchema(): StructType = {
-      requiredSchema
-    }
-
-    override def planInputPartitions(): JList[InputPartition[InternalRow]] = {
-      val lowerBound = filters.collectFirst {
-        case GreaterThan("i", v: Int) => v
-      }
-
-      val res = new ArrayList[InputPartition[InternalRow]]
-
-      if (lowerBound.isEmpty) {
-        res.add(new AdvancedInputPartition(0, 5, requiredSchema))
-        res.add(new AdvancedInputPartition(5, 10, requiredSchema))
-      } else if (lowerBound.get < 4) {
-        res.add(new AdvancedInputPartition(lowerBound.get + 1, 5, requiredSchema))
-        res.add(new AdvancedInputPartition(5, 10, requiredSchema))
-      } else if (lowerBound.get < 9) {
-        res.add(new AdvancedInputPartition(lowerBound.get + 1, 10, requiredSchema))
-      }
-
-      res
-    }
+    override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
   }
 
-  override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
-}
+  class SpecificInputPartitionReader(i: Array[Int], j: Array[Int])
+    extends InputPartition[InternalRow]
+      with InputPartitionReader[InternalRow] {
+    assert(i.length == j.length)
 
-class AdvancedInputPartition(start: Int, end: Int, requiredSchema: StructType)
-  extends InputPartition[InternalRow] with InputPartitionReader[InternalRow] {
+    private var current = -1
 
-  private var current = start - 1
+    override def createPartitionReader(): InputPartitionReader[InternalRow] = this
 
-  override def createPartitionReader(): InputPartitionReader[InternalRow] = {
-    new AdvancedInputPartition(start, end, requiredSchema)
-  }
-
-  override def close(): Unit = {}
-
-  override def next(): Boolean = {
-    current += 1
-    current < end
-  }
-
-  override def get(): InternalRow = {
-    val values = requiredSchema.map(_.name).map {
-      case "i" => current
-      case "j" => -current
-    }
-    InternalRow.fromSeq(values)
-  }
-}
-
-
-class SchemaRequiredDataSource extends DataSourceV2 with ReadSupport {
-
-  class Reader(val readSchema: StructType) extends DataSourceReader {
-    override def planInputPartitions(): JList[InputPartition[InternalRow]] =
-      java.util.Collections.emptyList()
-  }
-
-  override def createReader(options: DataSourceOptions): DataSourceReader = {
-    throw new IllegalArgumentException("requires a user-supplied schema")
-  }
-
-  override def createReader(schema: StructType, options: DataSourceOptions): DataSourceReader = {
-    new Reader(schema)
-  }
-}
-
-class BatchDataSourceV2 extends DataSourceV2 with ReadSupport {
-
-  class Reader extends DataSourceReader with SupportsScanColumnarBatch {
-    override def readSchema(): StructType = new StructType().add("i", "int").add("j", "int")
-
-    override def planBatchInputPartitions(): JList[InputPartition[ColumnarBatch]] = {
-      java.util.Arrays.asList(
-        new BatchInputPartitionReader(0, 50), new BatchInputPartitionReader(50, 90))
-    }
-  }
-
-  override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
-}
-
-class BatchInputPartitionReader(start: Int, end: Int)
-  extends InputPartition[ColumnarBatch] with InputPartitionReader[ColumnarBatch] {
-
-  private final val BATCH_SIZE = 20
-  private lazy val i = new OnHeapColumnVector(BATCH_SIZE, IntegerType)
-  private lazy val j = new OnHeapColumnVector(BATCH_SIZE, IntegerType)
-  private lazy val batch = new ColumnarBatch(Array(i, j))
-
-  private var current = start
-
-  override def createPartitionReader(): InputPartitionReader[ColumnarBatch] = this
-
-  override def next(): Boolean = {
-    i.reset()
-    j.reset()
-
-    var count = 0
-    while (current < end && count < BATCH_SIZE) {
-      i.putInt(count, current)
-      j.putInt(count, -current)
+    override def next(): Boolean = {
       current += 1
-      count += 1
+      current < i.length
     }
 
-    if (count == 0) {
-      false
-    } else {
-      batch.setNumRows(count)
-      true
-    }
+    override def get(): InternalRow = InternalRow(i(current), j(current))
+
+    override def close(): Unit = {}
   }
 
-  override def get(): ColumnarBatch = {
-    batch
-  }
+  class SchemaReadAttemptException(m: String) extends RuntimeException(m)
 
-  override def close(): Unit = batch.close()
-}
-
-class PartitionAwareDataSource extends DataSourceV2 with ReadSupport {
-
-  class Reader extends DataSourceReader with SupportsReportPartitioning {
-    override def readSchema(): StructType = new StructType().add("a", "int").add("b", "int")
-
-    override def planInputPartitions(): JList[InputPartition[InternalRow]] = {
-      // Note that we don't have same value of column `a` across partitions.
-      java.util.Arrays.asList(
-        new SpecificInputPartitionReader(Array(1, 1, 3), Array(4, 4, 6)),
-        new SpecificInputPartitionReader(Array(2, 4, 4), Array(6, 2, 2)))
-    }
-
-    override def outputPartitioning(): Partitioning = new MyPartitioning
-  }
-
-  class MyPartitioning extends Partitioning {
-    override def numPartitions(): Int = 2
-
-    override def satisfy(distribution: Distribution): Boolean = distribution match {
-      case c: ClusteredDistribution => c.clusteredColumns.contains("a")
-      case _ => false
+  class SimpleWriteOnlyDataSource extends SimpleWritableDataSource {
+    override def fullSchema(): StructType = {
+      // This is a bit hacky since this source implements read support but throws
+      // during schema retrieval. Might have to rewrite but it's done
+      // such so for minimised changes.
+      throw new SchemaReadAttemptException("read is not supported")
     }
   }
 
-  override def createReader(options: DataSourceOptions): DataSourceReader = new Reader
-}
+  object PushDownSamplingDataSource {
+    var samples: List[Sample] = Nil
 
-class SpecificInputPartitionReader(i: Array[Int], j: Array[Int])
-  extends InputPartition[InternalRow]
-  with InputPartitionReader[InternalRow] {
-  assert(i.length == j.length)
-
-  private var current = -1
-
-  override def createPartitionReader(): InputPartitionReader[InternalRow] = this
-
-  override def next(): Boolean = {
-    current += 1
-    current < i.length
   }
 
-  override def get(): InternalRow = InternalRow(i(current), j(current))
+  class PushDownSamplingDataSource extends DataSourceV2 with ReadSupport {
 
-  override def close(): Unit = {}
-}
+    class MyScanBuilder extends DataSourceReader with SupportsPushDownSampling {
 
-class SchemaReadAttemptException(m: String) extends RuntimeException(m)
+      import PushDownSamplingDataSource.samples
 
-class SimpleWriteOnlyDataSource extends SimpleWritableDataSource {
-  override def fullSchema(): StructType = {
-    // This is a bit hacky since this source implements read support but throws
-    // during schema retrieval. Might have to rewrite but it's done
-    // such so for minimised changes.
-    throw new SchemaReadAttemptException("read is not supported")
-  }
-}
+      override def pushSampling(sample: Sample): Unit = {
+        samples = sample :: samples
+      }
 
-object PushDownSamplingDataSource {
-  var samples : List[Sample] = Nil
+      override def readSchema(): StructType = new StructType().add("i", "int").add("j", "int")
 
-}
-class PushDownSamplingDataSource extends TableProvider {
-
-  class MyScanBuilder extends SimpleScanBuilder with SupportsPushDownSampling {
-    import PushDownSamplingDataSource.samples
-
-    override def pushSampling(sample: Sample): Unit = {
-      samples = sample :: samples
-    }
-
-    override def planInputPartitions(): Array[InputPartition] = Array.empty
-  }
-
-  override def getTable(options: CaseInsensitiveStringMap): Table = {
-    new SimpleBatchTable {
-      override def newScanBuilder(options: CaseInsensitiveStringMap): ScanBuilder = {
-        new MyScanBuilder
+      override def planInputPartitions(): JList[InputPartition[InternalRow]] = {
+        java.util.Arrays.asList(new SimpleInputPartition(0, 5))
       }
     }
+
+    override def createReader(options: DataSourceOptions): DataSourceReader = new MyScanBuilder
+
   }
-}
+

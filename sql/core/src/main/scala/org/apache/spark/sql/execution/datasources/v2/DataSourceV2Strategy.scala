@@ -18,15 +18,15 @@
 package org.apache.spark.sql.execution.datasources.v2
 
 import scala.collection.mutable
-
-import org.apache.spark.sql.{sources, Strategy}
+import org.apache.spark.sql.{Strategy, sources}
 import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, AttributeSet, Expression}
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
-import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Repartition}
+import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Repartition, Sample}
 import org.apache.spark.sql.execution.{FilterExec, ProjectExec, SparkPlan}
 import org.apache.spark.sql.execution.datasources.DataSourceStrategy
 import org.apache.spark.sql.execution.streaming.continuous.{ContinuousCoalesceExec, WriteToContinuousDataSource, WriteToContinuousDataSourceExec}
-import org.apache.spark.sql.sources.v2.reader.{DataSourceReader, SupportsPushDownFilters, SupportsPushDownRequiredColumns}
+import org.apache.spark.sql.sources.PrunedFilteredScan
+import org.apache.spark.sql.sources.v2.reader.{DataSourceReader, SupportsPushDownFilters, SupportsPushDownRequiredColumns, SupportsPushDownSampling}
 import org.apache.spark.sql.sources.v2.reader.streaming.ContinuousReader
 
 object DataSourceV2Strategy extends Strategy {
@@ -84,14 +84,13 @@ object DataSourceV2Strategy extends Strategy {
         val neededOutput = relation.output.filter(requiredColumns.contains)
         if (neededOutput != relation.output) {
           r.pruneColumns(neededOutput.toStructType)
-          val scan = r.build()
           val nameToAttr = relation.output.map(_.name).zip(relation.output).toMap
-          scan -> scan.readSchema().toAttributes.map {
+          r.readSchema().toAttributes.map {
             // We have to keep the attribute id during transformation.
             a => a.withExprId(nameToAttr(a.name).exprId)
           }
         } else {
-          r.build() -> relation.output
+          relation.output
         }
 
       case _ => relation.output
@@ -103,30 +102,34 @@ object DataSourceV2Strategy extends Strategy {
 
     case s @ Sample(_, _, _, _, l @ PhysicalOperation(p, f, e: DataSourceV2Relation)) =>
 
-      val scanbuilder = e.newScanBuilder()
+      val scanbuilder = e.newReader()
 
       scanbuilder match {
         case r: SupportsPushDownSampling if !s.withReplacement =>
           r.pushSampling(s)
-          val (scan, output) = pruneColumns(scanbuilder, e, p)
-          val plan = BatchScanExec(output, scan)
-          ProjectExec(p, plan) :: Nil
+          val (pushedFilters, postScanFilters) = pushFilters(scanbuilder, f)
+          val output = pruneColumns(scanbuilder, e, p ++ postScanFilters)
+          val scan = DataSourceV2ScanExec(
+            output, e.source, e.options, pushedFilters, scanbuilder)
+
+          val filterCondition = postScanFilters.reduceLeftOption(And)
+          val withFilter = filterCondition.map(FilterExec(_, scan)).getOrElse(scan)
+
+          // always add the projection, which will produce unsafe rows required by some operators
+          ProjectExec(p, withFilter) :: Nil
+
 
         case _ => Nil
 
       }
 
     case PhysicalOperation(project, filters, relation: DataSourceV2Relation) =>
-      val scanBuilder = relation.newScanBuilder()
-
-      val normalizedFilters = DataSourceStrategy
-        .normalizeFilters(filters.filterNot(SubqueryExpression.hasSubquery), relation.output)
-
+      val reader = relation.newReader()
       // `pushedFilters` will be pushed down and evaluated in the underlying data sources.
       // `postScanFilters` need to be evaluated after the scan.
       // `postScanFilters` and `pushedFilters` can overlap, e.g. the parquet row group filter.
-      val (pushedFilters, postScanFilters) = pushFilters(scanBuilder, normalizedFilters)
-      val (scan, output) = pruneColumns(scanBuilder, relation, project ++ postScanFilters)
+      val (pushedFilters, postScanFilters) = pushFilters(reader, filters)
+      val output = pruneColumns(reader, relation, project ++ postScanFilters)
       logInfo(
         s"""
            |Pushing operators to ${relation.source.getClass}

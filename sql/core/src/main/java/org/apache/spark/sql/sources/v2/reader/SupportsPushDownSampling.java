@@ -17,19 +17,16 @@
 
 package org.apache.spark.sql.sources.v2.reader;
 
-import org.apache.spark.annotation.Evolving;
-import org.apache.spark.sql.catalyst.expressions.Expression;
+
+import org.apache.spark.annotation.InterfaceStability;
 import org.apache.spark.sql.catalyst.plans.logical.Sample;
-import org.apache.spark.sql.sources.Filter;
-import org.apache.spark.sql.sources.v2.reader.Scan;
-import org.apache.spark.sql.sources.v2.reader.ScanBuilder;
-import org.apache.spark.sql.types.StructType;
+
 
 /**
  TODO
  */
-@Evolving
-public interface SupportsPushDownSampling extends ScanBuilder {
+@InterfaceStability.Evolving
+public interface SupportsPushDownSampling extends DataSourceReader {
 
 
   /**

@@ -518,7 +518,6 @@ object PushProjectionThroughUnion extends Rule[LogicalPlan] with PredicateHelper
       }
   }
 }
-
 /**
  * Attempts to eliminate the reading of unneeded columns from the query plan.
  *
