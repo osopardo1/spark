@@ -237,6 +237,7 @@ abstract class BaseRelation {
    */
   def unhandledFilters(filters: Array[Filter]): Array[Filter] = filters
 
+
 }
 
 /**
@@ -288,26 +289,20 @@ trait PrunedSampledFilteredScan {
 
 @InterfaceStability.Stable
 trait SampledFilteredScan {
-
   def buildScan(filters: Array[Filter], sample: Sample): RDD[Row]
 }
 
 @InterfaceStability.Stable
 trait PrunedSampledScan {
-
   def buildScan(requiredColumns: Array[String], sample: Sample): RDD[Row]
 }
 
 
 @InterfaceStability.Stable
 trait SampledScan {
-
   def buildScan(sample: Sample): RDD[Row]
 }
 
-/**
-  * Old Interface to do the PushDown sampling: used for testing purposes
-  */
 
 @InterfaceStability.Stable
 trait PushDownSampling {

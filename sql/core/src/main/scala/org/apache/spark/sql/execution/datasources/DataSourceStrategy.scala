@@ -278,6 +278,46 @@ case class DataSourceStrategy(conf: SQLConf) extends Strategy with Logging with 
 
   def apply(plan: LogicalPlan): Seq[execution.SparkPlan] = plan match {
 
+    case s @ Sample(_, _, _, _, physical_op @ PhysicalOperation(p, f, l: LogicalRelation)) =>
+
+      l.relation match {
+        case scan: PrunedSampledFilteredScan =>
+          pruneFilterProject(
+            l,
+            p,
+            f,
+            (a, f) => toCatalystRDD(l, a, scan.buildScan(a.map(_.name).toArray, f, s))) :: Nil
+        case scan: SampledFilteredScan =>
+          pruneFilterProject(
+            l,
+            p,
+            f,
+            (a, f) => toCatalystRDD(l, a, scan.buildScan(f, s))) :: Nil
+        case scan: PrunedSampledScan =>
+          pruneFilterProject(
+            l,
+            p,
+            f,
+            (a, f) => toCatalystRDD(l, a, scan.buildScan(a.map(_.name).toArray, s))) :: Nil
+        case scan: SampledScan =>
+          RowDataSourceScanExec(
+            l.output,
+            l.output.indices,
+            Set.empty,
+            Set.empty,
+            toCatalystRDD(l, scan.buildScan(s)),
+            scan,
+            None) :: Nil
+
+        case scan: PushDownSampling if scan.pushSampling(s) && !s.withReplacement =>
+          pruneFilterProject(
+            l,
+            p,
+            f,
+            (a, f) => toCatalystRDD(l, a, scan.buildScan(a.map(_.name).toArray, f))) :: Nil
+
+        case _ => Nil
+      }
 
     case PhysicalOperation(projects, filters, l @ LogicalRelation(t: CatalystScan, _, _, _)) =>
       pruneFilterProjectRaw(
@@ -313,38 +353,7 @@ case class DataSourceStrategy(conf: SQLConf) extends Strategy with Logging with 
         None) :: Nil
 
 
-    case s @ Sample(_, _, _, _, physical_op @ PhysicalOperation(p, f, l: LogicalRelation)) =>
 
-       l.relation match {
-        case scan: PrunedSampledFilteredScan =>
-          pruneFilterProject(
-            l,
-            p,
-            f,
-            (a, f) => toCatalystRDD(l, a, scan.buildScan(a.map(_.name).toArray, f, s))) :: Nil
-        case scan: SampledFilteredScan =>
-          pruneFilterProject(
-          l,
-          p,
-          f,
-          (a, f) => toCatalystRDD(l, a, scan.buildScan(f, s))) :: Nil
-        case scan: PrunedSampledScan =>
-          pruneFilterProject(
-            l,
-            p,
-            f,
-            (a, f) => toCatalystRDD(l, a, scan.buildScan(a.map(_.name).toArray, s))) :: Nil
-        case scan: SampledScan =>
-          RowDataSourceScanExec(
-            l.output,
-            l.output.indices,
-            Set.empty,
-            Set.empty,
-            toCatalystRDD(l, scan.buildScan(s)),
-            scan,
-            None) :: Nil
-        case _ => Nil
-      }
 
     case _ => Nil
   }

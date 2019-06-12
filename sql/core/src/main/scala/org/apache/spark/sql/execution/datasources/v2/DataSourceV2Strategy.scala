@@ -18,7 +18,8 @@
 package org.apache.spark.sql.execution.datasources.v2
 
 import scala.collection.mutable
-import org.apache.spark.sql.{Strategy, sources}
+
+import org.apache.spark.sql.{sources, Strategy}
 import org.apache.spark.sql.catalyst.expressions.{And, AttributeReference, AttributeSet, Expression}
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical.{AppendData, LogicalPlan, Repartition, Sample}
