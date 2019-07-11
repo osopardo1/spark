@@ -33,7 +33,7 @@ public interface SupportsPushDownSampling extends DataSourceReader {
 
    TODO
    */
-  void pushSampling(Sample sample);
+  boolean pushSampling(Sample sample);
 
 
 }

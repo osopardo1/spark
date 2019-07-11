@@ -661,8 +661,10 @@ class DataSourceV2Suite extends QueryTest with SharedSQLContext {
 
       import PushDownSamplingDataSource.samples
 
-      override def pushSampling(sample: Sample): Unit = {
+      override def pushSampling(sample: Sample): Boolean = {
         samples = sample :: samples
+        !sample.withReplacement
+
       }
 
       override def readSchema(): StructType = new StructType().add("i", "int").add("j", "int")

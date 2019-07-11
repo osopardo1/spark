@@ -106,8 +106,8 @@ object DataSourceV2Strategy extends Strategy {
       val scanbuilder = e.newReader()
 
       scanbuilder match {
-        case r: SupportsPushDownSampling if !s.withReplacement =>
-          r.pushSampling(s)
+        case r: SupportsPushDownSampling if r.pushSampling(s) =>
+
           val (pushedFilters, postScanFilters) = pushFilters(scanbuilder, f)
           val output = pruneColumns(scanbuilder, e, p ++ postScanFilters)
           val scan = DataSourceV2ScanExec(

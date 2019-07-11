@@ -308,7 +308,7 @@ trait SampledScan {
 trait PushDownSampling {
   def pushSampling(sample: Sample): Boolean
 
-  def buildScan(requiredColumns: Array[String], filters: Array[Filter]): RDD[Row]
+  def buildScan(requiredColumns: Array[String], filters: Array[Filter], sample: Sample): RDD[Row]
 }
 
 

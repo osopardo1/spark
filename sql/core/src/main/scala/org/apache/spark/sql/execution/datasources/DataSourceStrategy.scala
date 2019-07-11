@@ -309,12 +309,12 @@ case class DataSourceStrategy(conf: SQLConf) extends Strategy with Logging with 
             scan,
             None) :: Nil
 
-        case scan: PushDownSampling if scan.pushSampling(s) && !s.withReplacement =>
+        case scan: PushDownSampling if scan.pushSampling(s) =>
           pruneFilterProject(
             l,
             p,
             f,
-            (a, f) => toCatalystRDD(l, a, scan.buildScan(a.map(_.name).toArray, f))) :: Nil
+            (a, f) => toCatalystRDD(l, a, scan.buildScan(a.map(_.name).toArray, f, s))) :: Nil
 
         case _ => Nil
       }
